@@ -1,0 +1,16 @@
+kubectl exec -n postgres postgres-0 -- \
+  psql \
+    --username=postgres \
+    --dbname=appdb \
+    --expanded \
+    --command="
+      SELECT
+        application_name,
+        client_addr,
+        state,
+        sync_state,
+        write_lag,
+        flush_lag,
+        replay_lag
+      FROM pg_stat_replication;
+    "
