@@ -14,3 +14,18 @@ kubectl exec -n postgres postgres-0 -- \
         replay_lag
       FROM pg_stat_replication;
     "
+
+
+
+If using OrbStack on macOS, url is:
+postgres-primary.postgres.svc.cluster.local
+
+JDBC url: jdbc:postgresql://postgres-primary.postgres.svc.cluster.local:5432/appdb
+
+-----------
+
+If using Docker Desktop, url is:
+localhost:5432
+
+JDBC url:
+jdbc:postgresql://localhost:5432/appdb
