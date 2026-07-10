@@ -1,0 +1,328 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgres
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: postgres
+type: Opaque
+stringData:
+  POSTGRES_DB: appdb
+  POSTGRES_USER: postgres
+
+  # Replace these before using the manifest.
+  POSTGRES_PASSWORD: postgres
+  REPLICATION_USER: replicator
+  REPLICATION_PASSWORD: postgres
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: postgres
+data:
+  01-configure-primary.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+
+    # Only postgres-0 is the primary.
+    if [[ "$(hostname)" != "postgres-0" ]]; then
+      exit 0
+    fi
+
+    echo "Configuring postgres-0 as the primary server"
+
+    psql \
+      --username "${POSTGRES_USER}" \
+      --dbname "${POSTGRES_DB}" \
+      --set=ON_ERROR_STOP=1 <<SQL
+    SET password_encryption = 'scram-sha-256';
+
+    CREATE ROLE ${REPLICATION_USER}
+      WITH REPLICATION
+      LOGIN
+      PASSWORD '${REPLICATION_PASSWORD}';
+    SQL
+
+    cat >> "${PGDATA}/postgresql.conf" <<'EOF'
+
+    # Streaming replication settings
+    listen_addresses = '*'
+    wal_level = replica
+    max_wal_senders = 10
+    max_replication_slots = 10
+    wal_keep_size = '256MB'
+    hot_standby = on
+    password_encryption = 'scram-sha-256'
+    EOF
+
+    cat >> "${PGDATA}/pg_hba.conf" <<EOF
+
+    # Application connections
+    host all all 0.0.0.0/0 scram-sha-256
+
+    # PostgreSQL streaming replication
+    host replication ${REPLICATION_USER} 0.0.0.0/0 scram-sha-256
+    EOF
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-startup
+  namespace: postgres
+data:
+  start-postgres.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+
+    POD_NAME="$(hostname)"
+    POD_ORDINAL="${POD_NAME##*-}"
+
+    PRIMARY_HOST="postgres-0.postgres-headless.postgres.svc.cluster.local"
+
+    echo "Starting ${POD_NAME}; ordinal=${POD_ORDINAL}"
+
+    mkdir -p "${PGDATA}"
+    chown -R postgres:postgres /var/lib/postgresql/data
+    chmod 700 "${PGDATA}"
+
+    if [[ "${POD_ORDINAL}" == "0" ]]; then
+      echo "${POD_NAME} is the primary"
+      exec docker-entrypoint.sh postgres
+    fi
+
+    echo "${POD_NAME} is a standby"
+
+    if [[ ! -s "${PGDATA}/PG_VERSION" ]]; then
+      echo "Waiting for primary ${PRIMARY_HOST}"
+
+      until pg_isready \
+        --host="${PRIMARY_HOST}" \
+        --port=5432 \
+        --username="${REPLICATION_USER}"
+      do
+        sleep 2
+      done
+
+      echo "Primary is available; taking base backup"
+
+      rm -rf "${PGDATA:?}"/*
+
+      export PGPASSWORD="${REPLICATION_PASSWORD}"
+
+      gosu postgres pg_basebackup \
+        --host="${PRIMARY_HOST}" \
+        --port=5432 \
+        --username="${REPLICATION_USER}" \
+        --pgdata="${PGDATA}" \
+        --format=plain \
+        --wal-method=stream \
+        --write-recovery-conf \
+        --progress \
+        --verbose
+
+      unset PGPASSWORD
+
+      chmod 700 "${PGDATA}"
+    else
+      echo "Existing PostgreSQL data found; skipping base backup"
+    fi
+
+    exec docker-entrypoint.sh postgres
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: postgres
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+    statefulset.kubernetes.io/pod-name: postgres-0
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: postgres
+spec:
+  serviceName: postgres-headless
+  replicas: 3
+
+  # postgres-0 must become ready before replicas are started.
+  podManagementPolicy: OrderedReady
+
+  selector:
+    matchLabels:
+      app: postgres
+
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: postgres
+
+      containers:
+        - name: postgres
+          image: postgres:17
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /scripts/start-postgres.sh
+
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+
+            - name: REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: REPLICATION_USER
+
+            - name: REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: REPLICATION_PASSWORD
+
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready --host=127.0.0.1 --port=5432
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready --host=127.0.0.1 --port=5432
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready --host=127.0.0.1 --port=5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+            - name: postgres-startup
+              mountPath: /scripts
+              readOnly: true
+
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+
+      volumes:
+        - name: postgres-startup
+          configMap:
+            name: postgres-startup
+            defaultMode: 0755
+
+        - name: postgres-init
+          configMap:
+            name: postgres-init
+            defaultMode: 0755
+
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+
+        # Set this explicitly when your cluster has no default StorageClass.
+        # storageClassName: standard-rwo
