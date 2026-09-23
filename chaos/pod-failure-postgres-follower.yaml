@@ -1,0 +1,19 @@
+# "pod-failure" (rather than pod-kill) makes a replica unavailable for a
+# fixed window without deleting it, so you can watch it catch back up via
+# streaming replication when the window ends, instead of re-provisioning
+# from a fresh PVC.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: fail-postgres-follower
+  namespace: raft-lab
+spec:
+  action: pod-failure
+  mode: one
+  duration: "60s"
+  selector:
+    namespaces:
+      - raft-lab
+    labelSelectors:
+      app: postgres
+      role: replica

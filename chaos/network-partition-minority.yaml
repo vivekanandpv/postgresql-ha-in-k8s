@@ -1,0 +1,40 @@
+# The flagship demo of this repo. Cuts all network traffic, both
+# directions, between "node 2" (postgres-2 + etcd-2, i.e. whatever is
+# scheduled with that StatefulSet ordinal) and the other two nodes.
+#
+# With an odd-sized (3-member) Raft group, a 1-vs-2 split can never produce
+# two leaders: the isolated minority can see only itself, can never win a
+# quorum vote, and its etcd member (and, if it happened to be leader, its
+# Patroni leader lease) simply stops being renewable. The majority side
+# (2 of 3) keeps quorum, keeps an etcd leader, and if the isolated node
+# *was* the Postgres primary, Patroni on the majority side promotes a new
+# one after the DCS ttl (30s, see docker/patroni-postgres/patroni.yml)
+# expires. No split-brain is possible with this topology — that's the
+# point of Raft's majority-quorum rule, and why real deployments use an
+# odd member count.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: partition-node-2
+  namespace: raft-lab
+spec:
+  action: partition
+  mode: all
+  direction: both
+  selector:
+    namespaces:
+      - raft-lab
+    expressionSelectors:
+      - key: statefulset.kubernetes.io/pod-name
+        operator: In
+        values: ["postgres-2", "etcd-2"]
+  target:
+    mode: all
+    selector:
+      namespaces:
+        - raft-lab
+      expressionSelectors:
+        - key: statefulset.kubernetes.io/pod-name
+          operator: NotIn
+          values: ["postgres-2", "etcd-2"]
+  duration: "3m"

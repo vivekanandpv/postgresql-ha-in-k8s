@@ -1,0 +1,25 @@
+# Headless: gives each etcd pod a stable DNS name
+# (etcd-N.etcd-headless.raft-lab.svc.cluster.local) used for both peer
+# communication and client access. There is no separate ClusterIP/load
+# balanced Service in front of etcd — clients (Patroni, etcdctl) are given
+# the full member list and let etcd's own client handle retries, which is
+# also more honest about what "talking to a Raft cluster" looks like.
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-headless
+  namespace: raft-lab
+  labels:
+    app: etcd
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: etcd
+  ports:
+    - name: peer
+      port: 2380
+      targetPort: peer
+    - name: client
+      port: 2379
+      targetPort: client

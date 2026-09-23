@@ -1,0 +1,53 @@
+# Static, cluster-wide Patroni configuration baked into the image.
+#
+# Everything that must differ per pod (scope name aside) is supplied at
+# container start via PATRONI_* environment variables, which Patroni
+# layers on top of this file. See manifests/patroni/statefulset.yaml.
+#
+# NOTE: after the cluster bootstraps, the `bootstrap.dcs` section below is
+# written once into etcd and becomes the live source of truth. Changing
+# this file afterwards will NOT change a running cluster's behavior; use
+# `patronictl edit-config` for that instead (see docs/architecture.md).
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: false
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 256MB
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+
+postgresql:
+  create_replica_methods:
+    - basebackup
+  callbacks:
+    # on_role_change alone does not fire for the very first bootstrap (it
+    # only fires on a *transition* between roles); on_start covers that
+    # initial case since it runs whenever the postgres process starts,
+    # including right after bootstrap. Both point at the same script.
+    on_start: /scripts/on-role-change.sh
+    on_role_change: /scripts/on-role-change.sh
+
+watchdog:
+  mode: "off"
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

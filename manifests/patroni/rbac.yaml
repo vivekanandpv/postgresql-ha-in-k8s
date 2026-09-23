@@ -1,0 +1,34 @@
+# Patroni's DCS (consensus store) is etcd, not Kubernetes — so this RBAC
+# grants nothing related to leader election. Its only job is to let each
+# pod's on-role-change.sh callback (docker/patroni-postgres/on-role-change.sh)
+# patch its own `role` label after Patroni/etcd decide who the leader is,
+# which is what the postgres-primary / postgres-replica Services key off of.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: patroni
+  namespace: raft-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: patroni-pod-labeler
+  namespace: raft-lab
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: patroni-pod-labeler
+  namespace: raft-lab
+subjects:
+  - kind: ServiceAccount
+    name: patroni
+    namespace: raft-lab
+roleRef:
+  kind: Role
+  name: patroni-pod-labeler
+  apiGroup: rbac.authorization.k8s.io

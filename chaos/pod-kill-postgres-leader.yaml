@@ -1,0 +1,17 @@
+# Kills whichever pod currently holds role=master. Because the selector is
+# by label rather than a fixed pod name, this scenario is safe to re-run
+# after a previous failover has moved leadership to a different pod.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: kill-postgres-leader
+  namespace: raft-lab
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - raft-lab
+    labelSelectors:
+      app: postgres
+      role: master

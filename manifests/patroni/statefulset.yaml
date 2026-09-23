@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: raft-lab
+spec:
+  serviceName: postgres-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        # Default before Patroni's on-role-change callback fires for the
+        # first time; matches neither postgres-primary nor postgres-replica
+        # on purpose, so a not-yet-initialized pod never gets traffic.
+        role: none
+    spec:
+      serviceAccountName: patroni
+      terminationGracePeriodSeconds: 60
+
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: postgres
+
+      containers:
+        - name: patroni
+          image: raft-lab/patroni-postgres:local
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: postgres
+              containerPort: 5432
+            - name: patroni-api
+              containerPort: 8008
+
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: PATRONI_SCOPE
+              value: raft-lab-postgres
+            - name: PATRONI_NAME
+              value: "$(POD_NAME)"
+            - name: PATRONI_RESTAPI_LISTEN
+              value: "0.0.0.0:8008"
+            - name: PATRONI_RESTAPI_CONNECT_ADDRESS
+              value: "$(POD_IP):8008"
+            - name: PATRONI_POSTGRESQL_LISTEN
+              value: "0.0.0.0:5432"
+            - name: PATRONI_POSTGRESQL_CONNECT_ADDRESS
+              value: "$(POD_NAME).postgres-headless.raft-lab.svc.cluster.local:5432"
+            - name: PATRONI_POSTGRESQL_DATA_DIR
+              value: /var/lib/postgresql/data/pgdata
+            - name: PATRONI_POSTGRESQL_PGPASS
+              value: /tmp/pgpass
+            - name: PATRONI_ETCD3_HOSTS
+              value: "['etcd-0.etcd-headless.raft-lab.svc.cluster.local:2379','etcd-1.etcd-headless.raft-lab.svc.cluster.local:2379','etcd-2.etcd-headless.raft-lab.svc.cluster.local:2379']"
+            - name: PATRONI_LOG_LEVEL
+              value: INFO
+            - name: PATRONI_SUPERUSER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: SUPERUSER_USERNAME
+            - name: PATRONI_SUPERUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: SUPERUSER_PASSWORD
+            - name: PATRONI_REPLICATION_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: REPLICATION_USERNAME
+            - name: PATRONI_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: REPLICATION_PASSWORD
+
+          startupProbe:
+            httpGet:
+              path: /liveness
+              port: patroni-api
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
+
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: patroni-api
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: patroni-api
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi
+        # Set this explicitly when your cluster has no default StorageClass.
+        # kind ships one ("standard") out of the box.
+        # storageClassName: standard

@@ -1,0 +1,19 @@
+# Cluster topology: one control-plane node plus three workers, so that the
+# three etcd pods and three Patroni/PostgreSQL pods each land on a distinct
+# node (see podAntiAffinity in the manifests). That makes "kill a pod" and
+# "partition a node" demos behave like a real multi-node outage instead of
+# everything sharing one kernel network namespace.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: raft-lab
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      raft-lab/member: "0"
+  - role: worker
+    labels:
+      raft-lab/member: "1"
+  - role: worker
+    labels:
+      raft-lab/member: "2"

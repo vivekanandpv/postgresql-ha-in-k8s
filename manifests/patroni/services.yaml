@@ -1,0 +1,62 @@
+# Stable per-pod DNS for replication streaming and for Patroni members to
+# find each other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: raft-lab
+  labels:
+    app: postgres
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+    - name: patroni-api
+      port: 8008
+      targetPort: patroni-api
+---
+# Always routes to whichever pod currently holds role=master — a label that
+# on-role-change.sh keeps in sync with what Raft/etcd elected. Point every
+# writer at this Service; it follows failovers automatically within one
+# Patroni loop_wait interval (a few seconds), no client reconfiguration
+# needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: raft-lab
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+    role: master
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Load-balances across whichever pods are currently standby replicas. Good
+# for read-only traffic; membership changes as failovers happen.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: raft-lab
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+    role: replica
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
